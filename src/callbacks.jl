@@ -120,12 +120,14 @@ end
 
 # Base Case: Only one callback
 function find_first_continuous_callback(integrator, callback::AbstractContinuousCallback)
+    println("*** OI")
     (find_callback_time(integrator, callback, 1)..., 1, 1)
 end
 
 # Starting Case: Compute on the first callback
 function find_first_continuous_callback(integrator, callback::AbstractContinuousCallback,
                                         args...)
+    println("*** OI2")
     find_first_continuous_callback(integrator,
                                    find_callback_time(integrator, callback, 1)..., 1, 1,
                                    args...)
@@ -135,13 +137,16 @@ function find_first_continuous_callback(integrator, tmin::Number, upcrossing::Nu
                                         event_occured::Bool, event_idx::Int, idx::Int,
                                         counter::Int,
                                         callback2)
+    println("*** OI 3")
     counter += 1 # counter is idx for callback2.
     tmin2, upcrossing2, event_occurred2, event_idx2 = find_callback_time(integrator,
                                                                          callback2, counter)
 
     if event_occurred2 && (tmin2 < tmin || !event_occured)
+        println("In findfirstcontinous event_idx2 = $event_idx2")
         return tmin2, upcrossing2, true, event_idx2, counter, counter
     else
+        println("In findfirstcontinous event_idx = $event_idx")
         return tmin, upcrossing, event_occured, event_idx, idx, counter
     end
 end
@@ -149,6 +154,7 @@ end
 function find_first_continuous_callback(integrator, tmin::Number, upcrossing::Number,
                                         event_occured::Bool, event_idx::Int, idx::Int,
                                         counter::Int, callback2, args...)
+    println("*** OI 4")
     find_first_continuous_callback(integrator,
                                    find_first_continuous_callback(integrator, tmin,
                                                                   upcrossing, event_occured,
@@ -156,6 +162,12 @@ function find_first_continuous_callback(integrator, tmin::Number, upcrossing::Nu
                                                                   callback2)..., args...)
 end
 
+"""
+Determine if events occurred in the window between tprev and t. For each element in the
+    condition, check if there was a change of sign indicating that 0 was crossed. Saves
+    this info in a vector of Ints called event_idx. Also determines the time in which the
+    sign change occurred by repeating hte procedure in interpolated times inside (tprev, t).
+"""
 @inline function determine_event_occurance(integrator, callback::VectorContinuousCallback,
                                            counter)
     event_occurred = false
@@ -178,6 +190,7 @@ end
     interp_index = 0
     # Check if the event occured
     previous_condition = @views(integrator.callback_cache.previous_condition[1:(callback.len)])
+    # vector_event_idxs = @views(integrator.callback_cache.vector_event_idxs) #CHANGE 1
 
     if callback.idxs === nothing
         callback.condition(previous_condition, integrator.uprev, integrator.tprev,
@@ -189,6 +202,7 @@ end
     integrator.sol.destats.ncondition += 1
 
     ivec = integrator.vector_event_last_time
+    # ivec = vector_event_idxs #CHANGE 2
     prev_sign = @view(integrator.callback_cache.prev_sign[1:(callback.len)])
     next_sign = @view(integrator.callback_cache.next_sign[1:(callback.len)])
 
@@ -214,6 +228,7 @@ end
         abst = integrator.tprev + integrator.dt * callback.repeat_nudge
         tmp_condition = get_condition(integrator, callback, abst)
         @. prev_sign = sign(previous_condition)
+        # prev_sign[ivec] .= sign.(tmp_condition[ivec]) #TODO: CHANGE HERE!
         prev_sign[ivec] = sign(tmp_condition[ivec])
     else
         @. prev_sign = sign(previous_condition)
@@ -225,7 +240,7 @@ end
     @. next_sign = sign(next_condition)
 
     event_idx = findall_events!(next_sign, callback.affect!, callback.affect_neg!,
-                                prev_sign)
+                                prev_sign) #--DETECT EVENT BETWEEN THE PREVIOUS AND THE CURRENT TIME STEP (I THINK)
     if sum(event_idx) != 0
         event_occurred = true
         interp_index = callback.interp_points
@@ -244,6 +259,7 @@ end
                 event_idx = _event_idx
                 interp_index = i
                 fallback = false
+                println("abst = $abst, event_idx = $event_idx") #TODO: remove
                 break
             else
                 prev_sign_index = i
@@ -252,7 +268,7 @@ end
 
         if fallback
             # If you get here, then you need to reset the event_idx to the
-            # non-interpolated version
+            # non-interpolated version (BECAUSE THE INTERPOLATION IN THE STEP ABOVE DID NOT FIND THE SIGN CHANGE)
 
             abst = integrator.t
             next_condition = get_condition(integrator, callback, abst)
@@ -262,7 +278,10 @@ end
             interp_index = callback.interp_points
         end
     end
-
+    event_idx_int = convert(Array{Int64}, event_idx)
+    println("In determinevent, event_idx_int = $event_idx_int")
+    # vector_event_idxs[event_idx_int] .= true;
+    vector_event_idxs .= event_idx_int;
     event_occurred, interp_index, ts, prev_sign, prev_sign_index, event_idx
 end
 
@@ -470,8 +489,9 @@ function find_callback_time(integrator, callback::VectorContinuousCallback, coun
             if callback.rootfind != SciMLBase.NoRootFind && !isdiscrete(integrator.alg)
                 min_t = nextfloat(top_t)
                 min_event_idx = -1
-                for idx in 1:length(event_idx)
-                    if ArrayInterfaceCore.allowed_getindex(event_idx, idx) != 0
+                println("In findcallbacktime just before loop, $(integrator.event_last_time), $counter, $(integrator.vector_event_last_time), $(typeof(event_idx))")
+                for idx in 1:length(event_idx) #TODO: MAYBE THIS CAN BE CHANGED
+                    if ArrayInterfaceCore.allowed_getindex(event_idx, idx) != 0 #LOOPS OVER IDXS WITH AN EVENT
                         function zero_func(abst, p = nothing)
                             ArrayInterfaceCore.allowed_getindex(get_condition(integrator,
                                                                               callback,
@@ -480,8 +500,10 @@ function find_callback_time(integrator, callback::VectorContinuousCallback, coun
                         if zero_func(top_t) == 0
                             Θ = top_t
                         else
+                            vector_event_idxs = @views(integrator.callback_cache.vector_event_idxs) #CHANGE 3
                             if integrator.event_last_time == counter &&
-                               integrator.vector_event_last_time == idx &&
+                            #    integrator.vector_event_last_time == idx &&
+                               vector_event_idxs[idx] && #---------------------------------
                                abs(zero_func(bottom_t)) <=
                                100abs(integrator.last_event_error) &&
                                prev_sign_index == 1
@@ -489,7 +511,8 @@ function find_callback_time(integrator, callback::VectorContinuousCallback, coun
                                 # Determined that there is an event by derivative
                                 # But floating point error may make the end point negative
 
-                                bottom_t += integrator.dt * callback.repeat_nudge
+                                bottom_t += integrator.dt * callback.repeat_nudge #TODO: bottom_t does not reset for each index!
+                                println("**In nudge in find call back time, bottom_t = $bottom_t")
                                 sign_top = sign(zero_func(top_t))
                                 sign(zero_func(bottom_t)) * sign_top >= zero(sign_top) &&
                                     error("Double callback crossing floating pointer reducer errored. Report this issue.")
@@ -498,14 +521,17 @@ function find_callback_time(integrator, callback::VectorContinuousCallback, coun
                             Θ = bisection(zero_func, (bottom_t, top_t),
                                           isone(integrator.tdir), callback.rootfind,
                                           callback.abstol, callback.reltol)
+
+                            println("In bisection, bottom_t = $bottom_t, top_t = $top_t, tprev = $(integrator.tprev), min event idx = $min_event_idx, min_t = $Θ, event_idxs = $event_idx, idx = $idx, t = $(integrator.t)")
                             if integrator.tdir * Θ < integrator.tdir * min_t
                                 integrator.last_event_error = ODE_DEFAULT_NORM(zero_func(Θ),
                                                                                Θ)
                             end
                         end
                         if integrator.tdir * Θ < integrator.tdir * min_t
-                            min_event_idx = idx
+                            min_event_idx = idx #TODO: make this a vector!
                             min_t = Θ
+                            println("min event idx = $min_event_idx, min_t = $Θ, event_idxs = $event_idx, idx = $idx, t = $(integrator.t)")
                         end
                     end
                 end
@@ -518,6 +544,7 @@ function find_callback_time(integrator, callback::VectorContinuousCallback, coun
                 # a float which is slightly after, making it out of the domain, causing
                 # havoc.
                 new_t = min_t - integrator.tprev
+                println("new_t = $new_t")
             elseif interp_index != callback.interp_points && !isdiscrete(integrator.alg)
                 new_t = ts[interp_index] - integrator.tprev
                 min_event_idx = findfirst(isequal(1), event_idx)
@@ -536,8 +563,10 @@ function find_callback_time(integrator, callback::VectorContinuousCallback, coun
         error("Callback handling failed. Please file an issue with code to reproduce.")
     end
 
+    println("End of findcallbacktime, event_idx = $event_idx, $(typeof(event_idx)), $(collect(event_idx)), cnoverted = $(convert(Array{Int64}, event_idx))")
     new_t, ArrayInterfaceCore.allowed_getindex(prev_sign, min_event_idx),
     event_occurred::Bool, min_event_idx::Int
+    # event_occurred::Bool, convert(Array{Int64}, event_idx)
 end
 
 function apply_callback!(integrator,
@@ -549,7 +578,7 @@ function apply_callback!(integrator,
                              integrator.tdir * callback.dtrelax * integrator.dt))
     end
 
-    change_t_via_interpolation!(integrator, integrator.tprev + cb_time)
+    change_t_via_interpolation!(integrator, integrator.tprev + cb_time) #-------- PROBABLY HERE THEY CHANGE THE TIMES!
 
     # handle saveat
     _, savedexactly = savevalues!(integrator)
@@ -669,6 +698,7 @@ mutable struct CallbackCache{conditionType, signType}
     previous_condition::conditionType
     next_sign::signType
     prev_sign::signType
+    vector_event_idxs::BitArray
 end
 
 function CallbackCache(u, max_len, ::Type{conditionType},
@@ -677,7 +707,8 @@ function CallbackCache(u, max_len, ::Type{conditionType},
     previous_condition = similar(u, conditionType, max_len)
     next_sign = similar(u, signType, max_len)
     prev_sign = similar(u, signType, max_len)
-    CallbackCache(tmp_condition, previous_condition, next_sign, prev_sign)
+    vector_event_idxs = BitArray(undef, max_len)
+    CallbackCache(tmp_condition, previous_condition, next_sign, prev_sign, vector_event_idxs)
 end
 
 function CallbackCache(max_len, ::Type{conditionType},
@@ -686,5 +717,6 @@ function CallbackCache(max_len, ::Type{conditionType},
     previous_condition = zeros(conditionType, max_len)
     next_sign = zeros(signType, max_len)
     prev_sign = zeros(signType, max_len)
-    CallbackCache(tmp_condition, previous_condition, next_sign, prev_sign)
+    vector_event_idxs = BitArray(undef, max_len)
+    CallbackCache(tmp_condition, previous_condition, next_sign, prev_sign, vector_event_idxs)
 end
