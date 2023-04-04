@@ -120,14 +120,12 @@ end
 
 # Base Case: Only one callback
 function find_first_continuous_callback(integrator, callback::AbstractContinuousCallback)
-    println("*** OI")
     (find_callback_time(integrator, callback, 1)..., 1, 1)
 end
 
 # Starting Case: Compute on the first callback
 function find_first_continuous_callback(integrator, callback::AbstractContinuousCallback,
                                         args...)
-    println("*** OI2")
     find_first_continuous_callback(integrator,
                                    find_callback_time(integrator, callback, 1)..., 1, 1,
                                    args...)
@@ -137,16 +135,13 @@ function find_first_continuous_callback(integrator, tmin::Number, upcrossing::Nu
                                         event_occured::Bool, event_idx::Int, idx::Int,
                                         counter::Int,
                                         callback2)
-    println("*** OI 3")
     counter += 1 # counter is idx for callback2.
     tmin2, upcrossing2, event_occurred2, event_idx2 = find_callback_time(integrator,
                                                                          callback2, counter)
 
     if event_occurred2 && (tmin2 < tmin || !event_occured)
-        println("In findfirstcontinous event_idx2 = $event_idx2")
         return tmin2, upcrossing2, true, event_idx2, counter, counter
     else
-        println("In findfirstcontinous event_idx = $event_idx")
         return tmin, upcrossing, event_occured, event_idx, idx, counter
     end
 end
@@ -154,7 +149,6 @@ end
 function find_first_continuous_callback(integrator, tmin::Number, upcrossing::Number,
                                         event_occured::Bool, event_idx::Int, idx::Int,
                                         counter::Int, callback2, args...)
-    println("*** OI 4")
     find_first_continuous_callback(integrator,
                                    find_first_continuous_callback(integrator, tmin,
                                                                   upcrossing, event_occured,
@@ -190,7 +184,7 @@ Determine if events occurred in the window between tprev and t. For each element
     interp_index = 0
     # Check if the event occured
     previous_condition = @views(integrator.callback_cache.previous_condition[1:(callback.len)])
-    # vector_event_idxs = @views(integrator.callback_cache.vector_event_idxs) #CHANGE 1
+    vector_event_idxs = @views(integrator.callback_cache.vector_event_idxs) #get the vector to assign to it later
 
     if callback.idxs === nothing
         callback.condition(previous_condition, integrator.uprev, integrator.tprev,
@@ -201,15 +195,16 @@ Determine if events occurred in the window between tprev and t. For each element
     end
     integrator.sol.destats.ncondition += 1
 
-    ivec = integrator.vector_event_last_time
-    # ivec = vector_event_idxs #CHANGE 2
+    # ivec = integrator.vector_event_last_time
+    ivec = vector_event_idxs #CHANGE 1 Nudge all simultaneous events that occurred
     prev_sign = @view(integrator.callback_cache.prev_sign[1:(callback.len)])
     next_sign = @view(integrator.callback_cache.next_sign[1:(callback.len)])
 
     if integrator.event_last_time == counter &&
        minimum(ODE_DEFAULT_NORM(ArrayInterfaceCore.allowed_getindex(previous_condition,
                                                                     ivec), integrator.t)) <=
-       100ODE_DEFAULT_NORM(integrator.last_event_error, integrator.t)
+       100ODE_DEFAULT_NORM(integrator.last_event_error, integrator.t) &&
+       callback.skipinterpolation == false
 
         # If there was a previous event, utilize the derivative at the start to
         # chose the previous sign. If the derivative is positive at tprev, then
@@ -228,8 +223,8 @@ Determine if events occurred in the window between tprev and t. For each element
         abst = integrator.tprev + integrator.dt * callback.repeat_nudge
         tmp_condition = get_condition(integrator, callback, abst)
         @. prev_sign = sign(previous_condition)
-        # prev_sign[ivec] .= sign.(tmp_condition[ivec]) #TODO: CHANGE HERE!
-        prev_sign[ivec] = sign(tmp_condition[ivec])
+        prev_sign[ivec] .= sign.(tmp_condition[ivec]) #CHANGE 2!
+        # prev_sign[ivec] = sign(tmp_condition[ivec])
     else
         @. prev_sign = sign(previous_condition)
     end
@@ -241,12 +236,14 @@ Determine if events occurred in the window between tprev and t. For each element
 
     event_idx = findall_events!(next_sign, callback.affect!, callback.affect_neg!,
                                 prev_sign) #--DETECT EVENT BETWEEN THE PREVIOUS AND THE CURRENT TIME STEP (I THINK)
+
+
     if sum(event_idx) != 0
         event_occurred = true
         interp_index = callback.interp_points
     end
 
-    if callback.interp_points != 0 && !isdiscrete(integrator.alg) &&
+    if callback.interp_points != 0 && !isdiscrete(integrator.alg) && callback.skipinterpolation == false
        sum(event_idx) != length(event_idx) # Use the interpolants for safety checking
         fallback = true
         for i in 2:length(ts)
@@ -259,7 +256,6 @@ Determine if events occurred in the window between tprev and t. For each element
                 event_idx = _event_idx
                 interp_index = i
                 fallback = false
-                println("abst = $abst, event_idx = $event_idx") #TODO: remove
                 break
             else
                 prev_sign_index = i
@@ -279,9 +275,6 @@ Determine if events occurred in the window between tprev and t. For each element
         end
     end
     event_idx_int = convert(Array{Int64}, event_idx)
-    println("In determinevent, event_idx_int = $event_idx_int")
-    # vector_event_idxs[event_idx_int] .= true;
-    vector_event_idxs .= event_idx_int;
     event_occurred, interp_index, ts, prev_sign, prev_sign_index, event_idx
 end
 
@@ -474,122 +467,137 @@ function find_callback_time(integrator, callback::VectorContinuousCallback, coun
     event_occurred, interp_index, ts, prev_sign, prev_sign_index, event_idx = determine_event_occurance(integrator,
                                                                                                         callback,
                                                                                                         counter)
+
     if event_occurred
-        if callback.condition === nothing
-            new_t = zero(typeof(integrator.t))
-            min_event_idx = findfirst(isequal(1), event_idx)
-        else
-            if callback.interp_points != 0
-                top_t = ts[interp_index] # Top at the smallest
-                bottom_t = ts[prev_sign_index]
-            else
-                top_t = integrator.t
-                bottom_t = integrator.tprev
+        if callback.skipinterpolation
+            vector_event_idxs = @views(integrator.callback_cache.vector_event_idxs) #CHANGE 3
+            vector_event_idxs .= false
+            for idx in 1:length(event_idx) #TODO: MAYBE THIS CAN BE CHANGED
+                if ArrayInterfaceCore.allowed_getindex(event_idx, idx) != 0 #if there waws an event
+                    vector_event_idxs[idx] = true
+                end
             end
-            if callback.rootfind != SciMLBase.NoRootFind && !isdiscrete(integrator.alg)
-                min_t = nextfloat(top_t)
-                min_event_idx = -1
-                println("In findcallbacktime just before loop, $(integrator.event_last_time), $counter, $(integrator.vector_event_last_time), $(typeof(event_idx))")
-                for idx in 1:length(event_idx) #TODO: MAYBE THIS CAN BE CHANGED
-                    if ArrayInterfaceCore.allowed_getindex(event_idx, idx) != 0 #LOOPS OVER IDXS WITH AN EVENT
-                        function zero_func(abst, p = nothing)
-                            ArrayInterfaceCore.allowed_getindex(get_condition(integrator,
-                                                                              callback,
-                                                                              abst), idx)
-                        end
-                        if zero_func(top_t) == 0
-                            Θ = top_t
-                        else
-                            vector_event_idxs = @views(integrator.callback_cache.vector_event_idxs) #CHANGE 3
-                            if integrator.event_last_time == counter &&
-                            #    integrator.vector_event_last_time == idx &&
-                               vector_event_idxs[idx] && #---------------------------------
-                               abs(zero_func(bottom_t)) <=
-                               100abs(integrator.last_event_error) &&
-                               prev_sign_index == 1
-
-                                # Determined that there is an event by derivative
-                                # But floating point error may make the end point negative
-
-                                bottom_t += integrator.dt * callback.repeat_nudge #TODO: bottom_t does not reset for each index!
-                                println("**In nudge in find call back time, bottom_t = $bottom_t")
-                                sign_top = sign(zero_func(top_t))
-                                sign(zero_func(bottom_t)) * sign_top >= zero(sign_top) &&
-                                    error("Double callback crossing floating pointer reducer errored. Report this issue.")
+            new_t = integrator.t - integrator.tprev
+            min_event_idx = findfirst(x->x==true, event_idx)
+            return new_t, ArrayInterfaceCore.allowed_getindex(prev_sign, min_event_idx),
+            event_occurred::Bool, min_event_idx::Int
+        else
+            if callback.condition === nothing
+                new_t = zero(typeof(integrator.t))
+                min_event_idx = findfirst(isequal(1), event_idx)
+            else
+                if callback.rootfind != SciMLBase.NoRootFind && !isdiscrete(integrator.alg)
+                    top_t = callback.interp_points ≠ 0 ? ts[interp_index] : integrator.t
+                    min_t = nextfloat(top_t)
+                    min_event_idx = -1
+                    vector_event_idxs = @views(integrator.callback_cache.vector_event_idxs) #CHANGE 3
+                    for idx in 1:length(event_idx) #TODO: MAYBE THIS CAN BE CHANGED
+                        if ArrayInterfaceCore.allowed_getindex(event_idx, idx) != 0 #LOOPS OVER IDXS WITH AN EVENT
+                            if callback.interp_points != 0
+                                # top_t = ts[interp_index] # Top at the smallest
+                                bottom_t = ts[prev_sign_index]
+                            else
+                                # top_t = integrator.t
+                                bottom_t = integrator.tprev
                             end
-
-                            Θ = bisection(zero_func, (bottom_t, top_t),
-                                          isone(integrator.tdir), callback.rootfind,
-                                          callback.abstol, callback.reltol)
-
-                            println("In bisection, bottom_t = $bottom_t, top_t = $top_t, tprev = $(integrator.tprev), min event idx = $min_event_idx, min_t = $Θ, event_idxs = $event_idx, idx = $idx, t = $(integrator.t)")
-                            if integrator.tdir * Θ < integrator.tdir * min_t
-                                integrator.last_event_error = ODE_DEFAULT_NORM(zero_func(Θ),
-                                                                               Θ)
+                            function zero_func(abst, p = nothing)
+                                ArrayInterfaceCore.allowed_getindex(get_condition(integrator, callback, abst), idx)
                             end
-                        end
-                        if integrator.tdir * Θ < integrator.tdir * min_t
-                            min_event_idx = idx #TODO: make this a vector!
-                            min_t = Θ
-                            println("min event idx = $min_event_idx, min_t = $Θ, event_idxs = $event_idx, idx = $idx, t = $(integrator.t)")
+                            if zero_func(top_t) == 0
+                                Θ = top_t
+                            else
+                                if integrator.event_last_time == counter &&
+                                #    integrator.vector_event_last_time == idx &&
+                                vector_event_idxs[idx] && #---------------------------------
+                                abs(zero_func(bottom_t)) <=
+                                100abs(integrator.last_event_error) &&
+                                prev_sign_index == 1
+
+                                    # Determined that there is an event by derivative
+                                    # But floating point error may make the end point negative
+
+                                    bottom_t += integrator.dt * callback.repeat_nudge
+                                    sign_top = sign(zero_func(top_t))
+                                    sign(zero_func(bottom_t)) * sign_top >= zero(sign_top) &&
+                                        error("Double callback crossing floating pointer reducer errored. Report this issue.")
+                                end
+
+                                Θ = bisection(zero_func, (bottom_t, top_t),
+                                            isone(integrator.tdir), callback.rootfind,
+                                            callback.abstol, callback.reltol)
+
+                                if integrator.tdir * Θ < integrator.tdir * min_t
+                                    integrator.last_event_error = ODE_DEFAULT_NORM(zero_func(Θ),
+                                                                                Θ)
+                                end
+                            end
+                            if integrator.tdir * Θ < integrator.tdir * min_t #TODO: resolver isso aqui!
+                                min_event_idx = idx
+                                min_t = Θ
+                                fill!(vector_event_idxs, false) #if a new minimum is found, the previous events need to be reset
+                                vector_event_idxs[idx] = true #the first detected simultaneous event is the one whose idx is returned as min_event_idx (thus it depends on the order of the callbacks (in my case, the order of the units)); the others are just saved in this vector
+                            elseif integrator.tdir * Θ == integrator.tdir * min_t
+                                vector_event_idxs[idx] = true #the first detected simultaneous event is the one whose idx is returned as min_event_idx (thus it depends on the order of the callbacks (in my case, the order of the units)); the others are just saved in this vector
+                            end
                         end
                     end
+                    #Θ = prevfloat(...)
+                    # prevfloat guerentees that the new time is either 1 floating point
+                    # numbers just before the event or directly at zero, but not after.
+                    # If there's a barrier which is never supposed to be crossed,
+                    # then this will ensure that
+                    # The item never leaves the domain. Otherwise Roots.jl can return
+                    # a float which is slightly after, making it out of the domain, causing
+                    # havoc.
+                    new_t = min_t - integrator.tprev
+                elseif interp_index != callback.interp_points && !isdiscrete(integrator.alg)
+                    new_t = ts[interp_index] - integrator.tprev
+                    min_event_idx = findfirst(isequal(1), event_idx)
+                else
+                    # If no solve and no interpolants, just use endpoint
+                    new_t = integrator.dt
+                    min_event_idx = findfirst(isequal(1), event_idx)
                 end
-                #Θ = prevfloat(...)
-                # prevfloat guerentees that the new time is either 1 floating point
-                # numbers just before the event or directly at zero, but not after.
-                # If there's a barrier which is never supposed to be crossed,
-                # then this will ensure that
-                # The item never leaves the domain. Otherwise Roots.jl can return
-                # a float which is slightly after, making it out of the domain, causing
-                # havoc.
-                new_t = min_t - integrator.tprev
-                println("new_t = $new_t")
-            elseif interp_index != callback.interp_points && !isdiscrete(integrator.alg)
-                new_t = ts[interp_index] - integrator.tprev
-                min_event_idx = findfirst(isequal(1), event_idx)
-            else
-                # If no solve and no interpolants, just use endpoint
-                new_t = integrator.dt
-                min_event_idx = findfirst(isequal(1), event_idx)
             end
         end
-    else
+    else #no event
         new_t = zero(typeof(integrator.t))
         min_event_idx = 1
+        vector_event_idxs = @views(integrator.callback_cache.vector_event_idxs) #CHANGE 3
+        vector_event_idxs .= false
     end
 
     if event_occurred && min_event_idx < 0
         error("Callback handling failed. Please file an issue with code to reproduce.")
     end
 
-    println("End of findcallbacktime, event_idx = $event_idx, $(typeof(event_idx)), $(collect(event_idx)), cnoverted = $(convert(Array{Int64}, event_idx))")
     new_t, ArrayInterfaceCore.allowed_getindex(prev_sign, min_event_idx),
     event_occurred::Bool, min_event_idx::Int
     # event_occurred::Bool, convert(Array{Int64}, event_idx)
 end
 
+#cb_time is the Δt from the previous integration time to the new integration time
 function apply_callback!(integrator,
                          callback::Union{ContinuousCallback, VectorContinuousCallback},
                          cb_time, prev_sign, event_idx)
     if isadaptive(integrator)
-        set_proposed_dt!(integrator,
+        !callback.skipinterpolation && set_proposed_dt!(integrator,
                          integrator.tdir * max(nextfloat(integrator.opts.dtmin),
                              integrator.tdir * callback.dtrelax * integrator.dt))
     end
-
-    change_t_via_interpolation!(integrator, integrator.tprev + cb_time) #-------- PROBABLY HERE THEY CHANGE THE TIMES!
-
+    if !callback.skipinterpolation change_t_via_interpolation!(integrator, integrator.tprev + cb_time) end #-------- HERE THEY CHANGE THE TIMES!
+    change_t_via_interpolation!(integrator, integrator.tprev + cb_time)  #-------- HERE THEY CHANGE THE TIMES!
+    
     # handle saveat
-    _, savedexactly = savevalues!(integrator)
+    if !callback.skipinterpolation _, savedexactly = savevalues!(integrator) end
     saved_in_cb = true
 
     @inbounds if callback.save_positions[1]
         # if already saved then skip saving
-        savedexactly || savevalues!(integrator, true)
+        if !callback.skipinterpolation savedexactly || savevalues!(integrator, true) end
     end
 
-    integrator.u_modified = true
+    integrator.u_modified = callback.skipinterpolation ? false : true
 
     if prev_sign < 0
         if callback.affect! === nothing
